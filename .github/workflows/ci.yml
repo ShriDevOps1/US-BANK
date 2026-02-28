@@ -50,7 +50,7 @@ jobs:
         password: ${{ secrets.DOCKER_PASSWORD }}
 
     - name: Tag Image
-      run: docker tag java-ci-demo:latest yourdockerhubusername/java-ci-demo:latest
+      run: docker tag java-ci-demo:latest shripadshet/java-ci-demo:latest
 
     - name: Push Image
-      run: docker push yourdockerhubusername/java-ci-demo:latests
+      run: docker push shripadshet/java-ci-demo:latestss
