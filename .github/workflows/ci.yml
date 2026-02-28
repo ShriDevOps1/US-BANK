@@ -33,12 +33,15 @@ jobs:
     - name: Build Docker Image
       run: docker build -t java-ci-demo:latest .
 
-    - name: Install Trivy
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y wget
-        wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.50.0_Linux-64bit.deb
-        sudo dpkg -i trivy_0.50.0_Linux-64bit.deb
+    - name: Scan Docker Image
+      uses: aquasecurity/trivy-action@0.20.0
+      with:
+        image-ref: 'java-ci-demo:latest'
+        format: 'table'
+        exit-code: '1'
+        ignore-unfixed: true
+        vuln-type: 'os,library'
+        severity: 'CRITICAL,HIGH'
 
     - name: Scan Docker Image
       run: trivy image java-ci-demo:latest
