@@ -1,0 +1,49 @@
+name: "CI - Hotfix Branch (Fast-Track)"
+
+on:
+  push:
+    branches:
+      - 'hotfix/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  hotfix-validation:
+    name: Fast-Track Build & Critical Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Cache Maven Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-m2
+
+      - name: Build & Run Tests
+        run: mvn clean install
+
+      - name: Build Docker Image (hotfix)
+        run: docker build -t java-ci-demo:hotfix-${{ github.sha }} .
+
+      - name: Scan Docker Image (Critical CVEs only)
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: 'java-ci-demo:hotfix-${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL'

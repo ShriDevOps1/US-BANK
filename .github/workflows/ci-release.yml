@@ -1,0 +1,56 @@
+name: "CI - Release Branch (Full Validation)"
+
+on:
+  push:
+    branches:
+      - 'release/**'
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+
+jobs:
+  release-validation:
+    name: Full Build, Test & Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Cache Maven Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-m2
+
+      - name: Build & Run Tests
+        run: mvn clean install
+
+      - name: Extract Release Version
+        id: version
+        run: |
+          VERSION=$(echo "${{ github.ref_name }}" | sed 's|release/||')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Build Docker Image (release candidate)
+        run: docker build -t java-ci-demo:rc-${{ steps.version.outputs.version }} .
+
+      - name: Scan Docker Image (Strict - blocks on CRITICAL)
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: 'java-ci-demo:rc-${{ steps.version.outputs.version }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL'
