@@ -1,0 +1,48 @@
+name: "CI - Feature Branch (PR Validation)"
+
+on:
+  pull_request:
+    branches:
+      - develop
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+jobs:
+  validate:
+    name: Build & Test (PR Gate)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Cache Maven Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-m2
+
+      - name: Build & Run Tests
+        run: mvn clean install
+
+      - name: Build Docker Image (validation only)
+        run: docker build -t java-ci-demo:pr-${{ github.event.pull_request.number }} .
+
+      - name: Scan Docker Image (PR Check)
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: 'java-ci-demo:pr-${{ github.event.pull_request.number }}'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
