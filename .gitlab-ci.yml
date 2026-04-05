@@ -1,0 +1,206 @@
+# ============================================================
+# GitLab CI/CD — Flexible On-Demand Infrastructure Pipeline
+# ============================================================
+# HOW TO USE:
+#   Trigger a pipeline manually (CI/CD > Pipelines > Run pipeline)
+#   and set these variables:
+#
+#   INFRA_TYPE   : aks | acr | vnet | storage | all
+#   ENVIRONMENT  : dev | staging | prod
+#   ACTION       : plan | apply | destroy
+#   AKS_NODE_COUNT (optional, default 2)
+#   AKS_VM_SIZE    (optional, default Standard_D2s_v3)
+#   LOCATION       (optional, default eastus)
+# ============================================================
+
+default:
+  image: hashicorp/terraform:1.7.5
+  before_script:
+    - terraform --version
+
+# ── Variables ────────────────────────────────────────────────
+variables:
+  # User-settable at pipeline trigger time
+  INFRA_TYPE: "all"           # aks | acr | vnet | storage | all
+  ENVIRONMENT: "dev"          # dev | staging | prod
+  ACTION: "plan"              # plan | apply | destroy
+  AKS_NODE_COUNT: "2"
+  AKS_VM_SIZE: "Standard_D2s_v3"
+  LOCATION: "eastus"
+
+  # Internal
+  TF_ROOT: "infra/terraform"
+  TF_VAR_environment: $ENVIRONMENT
+  TF_VAR_location: $LOCATION
+  TF_VAR_aks_node_count: $AKS_NODE_COUNT
+  TF_VAR_aks_vm_size: $AKS_VM_SIZE
+  TF_VAR_infra_type: $INFRA_TYPE
+  TF_IN_AUTOMATION: "true"
+
+# ── Stages ───────────────────────────────────────────────────
+stages:
+  - validate
+  - plan
+  - apply
+  - app-build
+  - app-deploy
+  - destroy
+
+# ── Templates ────────────────────────────────────────────────
+.tf-init: &tf-init
+  - cd $TF_ROOT
+  - |
+    terraform init \
+      -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP}" \
+      -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT}" \
+      -backend-config="container_name=tfstate" \
+      -backend-config="key=${ENVIRONMENT}/${INFRA_TYPE}.tfstate" \
+      -input=false
+
+.tf-workspace: &tf-workspace
+  - terraform workspace select $ENVIRONMENT 2>/dev/null || terraform workspace new $ENVIRONMENT
+
+# ── Validate ─────────────────────────────────────────────────
+tf:validate:
+  stage: validate
+  script:
+    - *tf-init
+    - terraform fmt -check -recursive
+    - terraform validate
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "api"'
+  tags:
+    - infra
+
+# ── Plan ─────────────────────────────────────────────────────
+tf:plan:
+  stage: plan
+  script:
+    - *tf-init
+    - *tf-workspace
+    - |
+      terraform plan \
+        -var-file="environments/${ENVIRONMENT}.tfvars" \
+        -var="infra_type=${INFRA_TYPE}" \
+        -out=tfplan \
+        -input=false
+    - terraform show -json tfplan > plan.json
+  artifacts:
+    name: "tfplan-${ENVIRONMENT}-${INFRA_TYPE}-${CI_PIPELINE_ID}"
+    paths:
+      - $TF_ROOT/tfplan
+      - $TF_ROOT/plan.json
+    expire_in: 7 days
+    reports:
+      terraform: $TF_ROOT/plan.json
+  rules:
+    - if: '$ACTION == "plan" || $ACTION == "apply" || $ACTION == "destroy"'
+  tags:
+    - infra
+
+# ── Apply ─────────────────────────────────────────────────────
+tf:apply:
+  stage: apply
+  script:
+    - *tf-init
+    - *tf-workspace
+    - terraform apply -input=false tfplan
+    - terraform output -json > /tmp/tf-outputs.json
+    - cat /tmp/tf-outputs.json
+  dependencies:
+    - tf:plan
+  artifacts:
+    name: "tf-outputs-${ENVIRONMENT}-${INFRA_TYPE}-${CI_PIPELINE_ID}"
+    paths:
+      - /tmp/tf-outputs.json
+    expire_in: 30 days
+  environment:
+    name: $ENVIRONMENT
+    action: start
+  rules:
+    - if: '$ACTION == "apply"'
+      when: manual
+      allow_failure: false
+  tags:
+    - infra
+
+# ── App Build ─────────────────────────────────────────────────
+app:build:
+  stage: app-build
+  image: maven:3.9-eclipse-temurin-17
+  before_script: []
+  script:
+    - mvn clean package -DskipTests
+    - |
+      docker build \
+        -t ${ACR_LOGIN_SERVER}/${CI_PROJECT_NAME}:${CI_COMMIT_SHORT_SHA} \
+        -t ${ACR_LOGIN_SERVER}/${CI_PROJECT_NAME}:latest \
+        .
+    - echo "${ACR_PASSWORD}" | docker login ${ACR_LOGIN_SERVER} -u ${ACR_USERNAME} --password-stdin
+    - docker push ${ACR_LOGIN_SERVER}/${CI_PROJECT_NAME}:${CI_COMMIT_SHORT_SHA}
+    - docker push ${ACR_LOGIN_SERVER}/${CI_PROJECT_NAME}:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+  artifacts:
+    paths:
+      - target/*.jar
+    expire_in: 1 day
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $ACTION == "apply"'
+  tags:
+    - app-build
+
+# ── App Deploy to AKS ─────────────────────────────────────────
+app:deploy:
+  stage: app-deploy
+  image: bitnami/kubectl:latest
+  before_script: []
+  script:
+    - echo "${KUBECONFIG_CONTENT}" | base64 -d > /tmp/kubeconfig
+    - export KUBECONFIG=/tmp/kubeconfig
+    - kubectl cluster-info
+    - |
+      kubectl set image deployment/demo-app \
+        demo-app=${ACR_LOGIN_SERVER}/${CI_PROJECT_NAME}:${CI_COMMIT_SHORT_SHA} \
+        -n ${ENVIRONMENT} \
+        --record || \
+      kubectl apply -f k8s/ -n ${ENVIRONMENT}
+    - kubectl rollout status deployment/demo-app -n ${ENVIRONMENT} --timeout=120s
+  dependencies:
+    - app:build
+  environment:
+    name: $ENVIRONMENT
+    url: https://demo-app-${ENVIRONMENT}.yourdomain.com
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $ACTION == "apply"'
+      when: manual
+      allow_failure: false
+  tags:
+    - app-deploy
+
+# ── Destroy ───────────────────────────────────────────────────
+tf:destroy:
+  stage: destroy
+  script:
+    - *tf-init
+    - *tf-workspace
+    - |
+      terraform destroy \
+        -var-file="environments/${ENVIRONMENT}.tfvars" \
+        -var="infra_type=${INFRA_TYPE}" \
+        -auto-approve \
+        -input=false
+  environment:
+    name: $ENVIRONMENT
+    action: stop
+  rules:
+    - if: '$ACTION == "destroy"'
+      when: manual
+      allow_failure: false
+  tags:
+    - infra
